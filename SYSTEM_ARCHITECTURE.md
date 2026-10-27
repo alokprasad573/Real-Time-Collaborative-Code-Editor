@@ -1,425 +1,775 @@
 # System Architecture
 ## Real-Time Collaborative Code Editor
 
-**Version:** 1.0  
-**Architecture Style:** Modular services with horizontally scalable collaboration gateways and isolated execution workers.
+**Version:** 2.0  
+**Status:** Architecture Specification  
+**Based on:** Product Requirements Document (PRD) v2.0  
+**Architecture Style:** Modular, event-driven, service-oriented architecture
+
+---
 
 ## 1. Architecture Overview
 
-The system consists of five primary subsystems:
+The Real-Time Collaborative Code Editor is a browser-based development platform designed for simultaneous code editing, secure execution, debugging, repository import, and team collaboration.
 
-1. **Frontend:** Next.js, TypeScript, and Monaco Editor.
-2. **Application backend:** Node.js and Express for authentication, projects, permissions, and execution requests.
-3. **Collaboration subsystem:** Yjs CRDT documents, WebSockets, and ephemeral presence.
-4. **Persistence and coordination:** PostgreSQL, durable document updates, and Redis.
-5. **Execution subsystem:** A queue and isolated Docker workers for Python, JavaScript, C++, and Java.
+The architecture separates the application into the following logical layers:
 
-Collaboration and code execution are separate so that a slow or failing execution job does not block editing.
+1. **Presentation Layer:** User interface, Monaco Editor, terminal, debugging controls, and dashboards.
+2. **Application Layer:** Authentication, project management, workspace permissions, GitHub integration, version management, and analytics APIs.
+3. **Collaboration Layer:** WebSocket connections, Yjs synchronization, presence, and collaborative document persistence.
+4. **Execution Layer:** Isolated code execution workers, debugging workers, and collaborative terminal environments.
+5. **Data Layer:** PostgreSQL, durable document updates, project snapshots, and Redis-backed messaging and job queues.
+6. **Infrastructure and Security Layer:** Authentication enforcement, resource isolation, monitoring, audit logging, and deployment management.
+
+The architecture ensures that untrusted code runs separately from the API and collaboration services.
 
 ## 2. High-Level System Architecture
 
-The following diagram uses Mermaid and can be rendered in VS Code Markdown preview extensions that support Mermaid.
+The following diagram shows the primary components and their relationships.
 
 ```mermaid
 flowchart TB
-    U[Users / Browsers]
+    U["Users and Collaborators"]
 
-    subgraph FE["Frontend"]
-        NEXT[Next.js + TypeScript]
-        MONACO[Monaco Editor]
-        YJS[Yjs Document + Awareness]
-        NEXT --> MONACO
-        MONACO <--> YJS
+    subgraph CLIENT["Presentation Layer"]
+        WEB["Next.js Web Application"]
+        EDITOR["Monaco Code Editor"]
+        FILES["Project Explorer"]
+        DEBUG_UI["Debugging Interface"]
+        TERM_UI["Collaborative Terminal UI"]
+        DASH["Execution Analytics Dashboard"]
     end
 
-    subgraph BE["Application Backend"]
-        API[Express REST API]
-        WS[WebSocket Collaboration Gateway]
-        AUTH[Authentication and Authorization]
+    subgraph APP["Application Layer"]
+        API["Node.js Express API"]
+        AUTH["Authentication Service"]
+        PROJECT["Project and File Service"]
+        TEAM["Workspace and Permission Service"]
+        GITHUB["GitHub Integration Service"]
+        VERSION["Version History Service"]
+        ANALYTICS["Execution History and Analytics API"]
     end
 
-    subgraph DATA["Persistence and Coordination"]
-        PG[(PostgreSQL)]
-        REDIS[(Redis)]
-        DOC[Durable Yjs Updates and Snapshots]
+    subgraph COLLAB["Collaboration Layer"]
+        WS["WebSocket Gateway"]
+        YJS["Yjs Collaboration Provider"]
+        AWARE["Yjs Awareness and Presence"]
+        DOCSTORE["Document Persistence Service"]
     end
 
-    subgraph EXEC["Code Execution"]
-        QUEUE[Execution Queue]
-        WORKER[Execution Worker Manager]
-        PY[Python Sandbox]
-        JS[Node.js Sandbox]
-        CPP[C++ Sandbox]
-        JAVA[Java Sandbox]
+    subgraph EXEC["Isolated Execution Layer"]
+        QUEUE["Redis-Backed Job Queue"]
+        EXECUTOR["Execution Worker"]
+        DEBUGGER["Debugging Worker"]
+        TERMINAL["Terminal Session Manager"]
+        SANDBOX["Isolated Execution Containers"]
     end
 
-    U <--> NEXT
-    YJS <--> WS
-    NEXT <--> API
+    subgraph DATA["Data Layer"]
+        DB[("PostgreSQL")]
+        REDIS[("Redis")]
+        SNAP["Document Snapshots and Version History"]
+        LOGS["Execution Records and Audit Logs"]
+    end
+
+    subgraph EXTERNAL["External Services"]
+        GH["GitHub API"]
+    end
+
+    U --> WEB
+    WEB --> EDITOR
+    WEB --> FILES
+    WEB --> DEBUG_UI
+    WEB --> TERM_UI
+    WEB --> DASH
+
+    WEB -->|"HTTPS / REST"| API
+    WEB <-->|"WebSocket"| WS
 
     API --> AUTH
-    WS --> AUTH
+    API --> PROJECT
+    API --> TEAM
+    API --> GITHUB
+    API --> VERSION
+    API --> ANALYTICS
 
-    API <--> PG
-    WS <--> DOC
-    DOC --> PG
+    WS --> YJS
+    YJS --> AWARE
+    YJS --> DOCSTORE
+    DOCSTORE --> DB
+    DOCSTORE --> SNAP
 
-    WS <--> REDIS
-    REDIS <--> WS
+    AUTH --> DB
+    PROJECT --> DB
+    TEAM --> DB
+    VERSION --> DB
+    VERSION --> SNAP
+    ANALYTICS --> DB
 
-    API --> QUEUE
-    QUEUE --> WORKER
-    WORKER --> PY
-    WORKER --> JS
-    WORKER --> CPP
-    WORKER --> JAVA
+    GITHUB <-->|"Authorized API calls"| GH
+    GITHUB --> PROJECT
 
-    WORKER --> PG
-    WORKER --> API
+    API -->|"Authorized execution request"| QUEUE
+    QUEUE --> EXECUTOR
+    QUEUE --> DEBUGGER
+
+    EXECUTOR --> SANDBOX
+    DEBUGGER --> SANDBOX
+    TERMINAL --> SANDBOX
+    API --> TERMINAL
+
+    EXECUTOR --> LOGS
+    DEBUGGER --> LOGS
+    TERMINAL --> LOGS
+    LOGS --> DB
+
+    WS -.->|"Cross-instance coordination"| REDIS
+    QUEUE --> REDIS
+
+    classDef client fill:#dbeafe,stroke:#2563eb,color:#111827
+    classDef application fill:#dcfce7,stroke:#16a34a,color:#111827
+    classDef collaboration fill:#f3e8ff,stroke:#9333ea,color:#111827
+    classDef execution fill:#ffedd5,stroke:#ea580c,color:#111827
+    classDef data fill:#f3f4f6,stroke:#6b7280,color:#111827
+
+    class WEB,EDITOR,FILES,DEBUG_UI,TERM_UI,DASH client
+    class API,AUTH,PROJECT,TEAM,GITHUB,VERSION,ANALYTICS application
+    class WS,YJS,AWARE,DOCSTORE collaboration
+    class QUEUE,EXECUTOR,DEBUGGER,TERMINAL,SANDBOX execution
+    class DB,REDIS,SNAP,LOGS data
 ```
 
-**Notes:**
-- The WebSocket gateway and Express API may initially run in the same Node.js application, but their responsibilities should remain logically separate.
-- The collaboration server must use a Yjs-compatible synchronization protocol.
-- Redis Pub/Sub supports cross-instance message distribution; it is not durable document storage.
-- PostgreSQL stores application metadata and durable document state, directly or through a dedicated persistence component.
-- Execution workers run independently from the collaboration gateway.
+**Architecture principle:** PostgreSQL and durable document storage preserve application state. Redis supports transient coordination and queued jobs; it is not the permanent source of collaborative document truth.
 
 ## 3. Component Responsibilities
 
-### 3.1 Frontend
+### 3.1 Presentation Layer
 
-**Technologies:** Next.js, TypeScript, Monaco Editor, Yjs.
-
-Responsibilities:
-
-- Render the editor, file explorer, tabs, terminal output, and collaborator presence.
-- Maintain the local Yjs document.
-- Apply local edits immediately.
-- Exchange CRDT updates with the collaboration server.
-- Display remote cursors and selections.
-- Submit execution requests and display job results.
-- Handle reconnects and synchronization recovery.
-
-### 3.2 REST API
-
-**Technologies:** Node.js and Express.
+**Technology:** Next.js, TypeScript, Tailwind CSS, Monaco Editor.
 
 Responsibilities:
 
-- Register and authenticate users.
-- Create and manage projects.
-- Manage files and project metadata.
-- Enforce project ownership and membership.
-- Authorize collaboration room access.
-- Validate code execution requests.
-- Submit execution jobs.
-- Expose execution history and status endpoints.
+- Provide registration, login, and project management interfaces.
+- Display the multi-file editor and syntax highlighting.
+- Show collaborator cursors, selections, and online presence.
+- Provide execution controls and output panels.
+- Expose debugging controls supported by configured runtimes.
+- Display terminal sessions and project version history.
+- Provide GitHub repository import workflows.
+- Display workspace membership, permissions, and execution analytics.
 
-REST endpoints should not carry the continuous stream of collaborative document updates.
+The frontend must never be treated as the authority for permissions or execution security.
 
-### 3.3 Collaboration Server
+### 3.2 Application API Layer
 
-**Technologies:** Yjs and WebSockets, using Hocuspocus or an equivalent implementation.
+**Technology:** Node.js and Express.
 
-Responsibilities:
+The API is responsible for:
 
-- Authenticate WebSocket connections.
-- Authorize room membership and editing permissions.
-- Synchronize Yjs document updates.
-- Distribute updates between connected clients.
-- Broadcast ephemeral awareness information.
-- Coordinate persistence and recovery.
-- Support horizontal scaling across multiple instances.
+- Authentication and session validation.
+- Project and file management.
+- Workspace membership and role-based access control.
+- GitHub authorization and repository import.
+- Project version creation and restoration.
+- Execution and debugging job submission.
+- Terminal session authorization.
+- Execution history, analytics, and audit records.
 
-### 3.4 PostgreSQL
+The API validates project permissions before protected operations. Long-running execution tasks are delegated to workers rather than performed inside API request handlers.
 
-Stores relational application data, including:
+### 3.3 Collaboration Layer
 
-- Users and authentication-related identifiers.
-- Projects and files metadata.
-- Project membership and permissions.
-- Execution requests and results metadata.
-- Audit records.
-- Durable document snapshots or references to stored updates.
-
-Use database migrations, indexes, transactions, and appropriate access controls.
-
-### 3.5 Redis
-
-Redis provides:
-
-- Cross-instance messaging.
-- Execution queue coordination.
-- Rate-limit counters and temporary state.
-- Optional presence or room-routing metadata.
-
-Redis Pub/Sub messages can be lost while subscribers are disconnected. Document recovery must therefore rely on durable state and synchronization, not Pub/Sub alone.
-
-### 3.6 Execution Worker Manager
+**Technology:** Yjs, WebSockets, Yjs Awareness, Hocuspocus or a custom Yjs-compatible provider.
 
 Responsibilities:
 
-- Accept validated execution jobs.
-- Enforce per-user and global concurrency limits.
-- Dispatch jobs to language-specific workers.
-- Create isolated execution environments.
-- Enforce runtime and resource budgets.
-- Capture bounded output and exit status.
-- Terminate and clean up completed or failed jobs.
-- Persist execution metadata and publish job status.
+- Maintain collaborative document sessions.
+- Exchange incremental Yjs document updates.
+- Broadcast cursor positions, selections, and presence information.
+- Authenticate WebSocket connections and authorize room membership.
+- Recover documents using durable updates or snapshots.
+- Coordinate synchronization across multiple server instances.
 
-Each language uses a dedicated, prebuilt runtime image. Untrusted code must never be executed as a shell command directly on the application host.
+Presence information is temporary and should not be treated as durable project data.
 
-## 4. Collaboration Data Flow
+### 3.4 Execution and Debugging Layer
+
+**Technology:** Docker-based isolated workers, language runtimes, Redis-backed queue.
+
+Responsibilities:
+
+- Execute Python, JavaScript, C++, and Java programs.
+- Compile C++ and Java programs before execution.
+- Support standard input, output, and error reporting.
+- Execute debugging sessions through language-specific debugging adapters.
+- Apply configurable CPU, memory, process, disk, timeout, and output limits.
+- Terminate expired or unauthorized jobs.
+- Record execution status and relevant metrics.
+
+Each job must execute within an isolated environment. API and collaboration processes must never execute arbitrary user code directly.
+
+### 3.5 Collaborative Terminal Layer
+
+The terminal session manager creates and controls isolated terminal environments.
+
+Responsibilities:
+
+- Authenticate users joining a terminal session.
+- Associate terminal sessions with a project and authorized collaborators.
+- Stream terminal input and output through a controlled channel.
+- Enforce session timeouts and resource limits.
+- Define how simultaneous input is handled.
+- Terminate idle or expired sessions.
+- Prevent access to the host filesystem, host credentials, and Docker socket.
+
+A collaborative terminal is a controlled project environment, not unrestricted access to the server's operating system.
+
+### 3.6 GitHub Integration Layer
+
+Responsibilities:
+
+- Authorize users to access selected repositories.
+- Retrieve repository files through the GitHub API.
+- Validate imported file paths and file sizes.
+- Preserve directory structure during import.
+- Report import status and failures.
+- Avoid exposing GitHub credentials to the frontend or executed code.
+
+The initial release supports repository import. Bidirectional synchronization and advanced Git workflows are not assumed unless separately implemented.
+
+## 4. Database Architecture
+
+**Primary database:** PostgreSQL  
+**Messaging and queue infrastructure:** Redis  
+**Collaborative document engine:** Yjs
+
+The following entity model is a proposed logical schema. Exact columns, indexes, and constraints should be finalized during database design.
+
+```mermaid
+erDiagram
+    USERS ||--o{ WORKSPACE_MEMBERS : joins
+    WORKSPACES ||--o{ WORKSPACE_MEMBERS : contains
+    WORKSPACES ||--o{ PROJECTS : owns
+    USERS ||--o{ PROJECTS : creates
+
+    PROJECTS ||--o{ PROJECT_MEMBERS : grants_access
+    USERS ||--o{ PROJECT_MEMBERS : receives_access
+
+    PROJECTS ||--o{ FILES : contains
+    PROJECTS ||--o{ DOCUMENT_UPDATES : persists
+    PROJECTS ||--o{ PROJECT_VERSIONS : versions
+    USERS ||--o{ PROJECT_VERSIONS : creates
+
+    PROJECTS ||--o{ EXECUTIONS : records
+    USERS ||--o{ EXECUTIONS : requests
+
+    PROJECTS ||--o{ TERMINAL_SESSIONS : contains
+    USERS ||--o{ TERMINAL_SESSIONS : starts
+
+    PROJECTS ||--o{ AUDIT_LOGS : records
+    USERS ||--o{ AUDIT_LOGS : performs
+
+    USERS {
+        uuid id PK
+        string email
+        string auth_provider
+        timestamp created_at
+    }
+
+    WORKSPACES {
+        uuid id PK
+        string name
+        uuid owner_id FK
+        timestamp created_at
+    }
+
+    WORKSPACE_MEMBERS {
+        uuid workspace_id FK
+        uuid user_id FK
+        string role
+    }
+
+    PROJECTS {
+        uuid id PK
+        uuid owner_id FK
+        uuid workspace_id FK
+        string name
+        timestamp created_at
+        timestamp updated_at
+    }
+
+    PROJECT_MEMBERS {
+        uuid project_id FK
+        uuid user_id FK
+        string role
+    }
+
+    FILES {
+        uuid id PK
+        uuid project_id FK
+        string path
+        string language
+        text content
+        timestamp updated_at
+    }
+
+    DOCUMENT_UPDATES {
+        uuid id PK
+        uuid project_id FK
+        string document_id
+        text update_reference
+        timestamp created_at
+    }
+
+    PROJECT_VERSIONS {
+        uuid id PK
+        uuid project_id FK
+        uuid created_by FK
+        string snapshot_reference
+        string description
+        timestamp created_at
+    }
+
+    EXECUTIONS {
+        uuid id PK
+        uuid project_id FK
+        uuid user_id FK
+        string language
+        string status
+        integer duration_ms
+        timestamp created_at
+    }
+
+    TERMINAL_SESSIONS {
+        uuid id PK
+        uuid project_id FK
+        uuid user_id FK
+        string status
+        timestamp created_at
+    }
+
+    AUDIT_LOGS {
+        uuid id PK
+        uuid project_id FK
+        uuid user_id FK
+        string action
+        timestamp created_at
+    }
+```
+
+### Database design notes
+
+- `FILES.content` is a logical representation; implementation may store content separately from metadata to avoid conflicting writes with Yjs.
+- `DOCUMENT_UPDATES.update_reference` represents a logical reference to durable Yjs update storage, not necessarily a text field containing serialized updates.
+- `PROJECT_VERSIONS.snapshot_reference` identifies a durable snapshot or version artifact.
+- Execution records should reference securely stored output only when retention and privacy policies allow it.
+- Workspace and project membership tables must enforce role-based permissions.
+- Database transactions should protect critical operations such as project creation and version restoration.
+
+## 5. Real-Time Collaboration Workflow
 
 ```mermaid
 sequenceDiagram
-    participant A as Client A
-    participant WS as Collaboration Server
-    participant B as Client B
-    participant DB as Durable Storage
+    actor A as User A
+    actor B as User B
+    participant FE as Next.js Client
+    participant WS as WebSocket Gateway
+    participant Y as Yjs Provider
+    participant DB as PostgreSQL / Durable Storage
 
-    A->>A: Apply local edit to Y.Doc
-    A->>WS: Send Yjs update
-    WS->>WS: Authenticate and authorize
-    WS->>B: Broadcast update
-    B->>B: Apply update to Y.Doc
-    WS->>DB: Persist update or schedule persistence
-    DB-->>WS: Persistence acknowledged
-    WS-->>A: Optional sync acknowledgement
+    A->>FE: Open project
+    FE->>WS: Connect with authenticated session
+    WS->>WS: Validate identity and project access
+    WS->>Y: Join authorized document room
+    Y->>DB: Load persisted document state
+    DB-->>Y: Latest updates or snapshot
+    Y-->>FE: Synchronize document state
+
+    B->>FE: Join same project
+    FE->>WS: Connect and request room access
+    WS->>WS: Validate permissions
+    WS->>Y: Join document room
+    Y-->>FE: Synchronize current state
+
+    A->>FE: Edit document
+    FE->>Y: Apply local Yjs update
+    Y-->>FE: Broadcast update to User B
+    FE-->>B: Update editor state
+
+    Y->>DB: Persist document update
+    Note over Y,DB: Persist asynchronously with recovery safeguards
+
+    B->>FE: Reconnect after disconnection
+    FE->>WS: Reconnect and reauthorize
+    WS->>Y: Request synchronization
+    Y-->>FE: Exchange missing updates
 ```
 
-### Collaboration Rules
+### Collaboration guarantees
 
-1. Local edits should not wait for a database write before appearing in the editor.
-2. The collaboration protocol must merge concurrent updates using Yjs.
-3. The server must enforce access permissions.
-4. Persistence must be durable and recoverable.
-5. Reconnecting clients must synchronize against current document state.
-6. Awareness messages are transient and should not be treated as durable document content.
-
-A production implementation must explicitly define when an update is considered durably saved and how failures between broadcast and persistence are recovered.
-
-## 5. Concurrent Editing and CRDT Design
-
-Yjs maintains a shared document state and represents edits as CRDT updates.
-
-When two clients edit simultaneously:
-
-- Each client applies its own edit locally.
-- Both clients generate updates.
-- Updates are exchanged through the collaboration service.
-- Yjs merges operations so replicas converge when they receive the same updates.
-- The system does not resolve conflicts by replacing the entire document with the latest client write.
-
-### Document Model
-
-- Use a Yjs document (`Y.Doc`) for each collaborative document or file.
-- Use shared Yjs text structures for file contents.
-- Use Yjs Awareness for cursors, selections, and online presence.
-- Persist updates and periodic snapshots.
-- Restore the latest snapshot and apply subsequent updates on recovery.
-
-### Authorization Boundary
-
-CRDT convergence is not an authorization mechanism. The server must verify room access and editing rights. If untrusted clients are permitted to submit raw CRDT updates, the implementation must also account for malformed or oversized updates and enforce server-side resource limits.
+- Local edits should appear immediately.
+- Concurrent changes must converge through Yjs synchronization.
+- Reconnecting users must exchange missing document updates.
+- Document persistence must survive service restarts.
+- WebSocket room access must be authorized on the server.
+- Presence events may be ephemeral, while document updates must be durable.
 
 ## 6. Code Execution Workflow
 
 ```mermaid
 sequenceDiagram
-    participant U as User
+    actor U as User
+    participant FE as Frontend
     participant API as Express API
-    participant Q as Execution Queue
-    participant W as Worker Manager
-    participant C as Isolated Container
+    participant Q as Redis Job Queue
+    participant W as Execution Worker
+    participant SB as Isolated Container
     participant DB as PostgreSQL
 
-    U->>API: Submit language, source, stdin
-    API->>API: Authenticate and authorize
-    API->>API: Validate request and quotas
-    API->>DB: Create execution record
+    U->>FE: Select language and Run
+    FE->>API: Submit source, language, project and input
+    API->>API: Authenticate and authorize request
     API->>Q: Enqueue execution job
-    API-->>U: Return job ID
+    API-->>FE: Return job identifier
 
-    Q->>W: Deliver job
-    W->>C: Start restricted sandbox
-    C->>C: Compile if required
-    C->>C: Execute within limits
-    C-->>W: Exit status and bounded output
-    W->>W: Terminate and clean up
-    W->>DB: Persist final execution status
-    U->>API: Poll execution status
-    API-->>U: Result, errors, duration
+    Q->>W: Dispatch job
+    W->>SB: Create isolated runtime
+    SB->>SB: Execute or compile and execute
+    SB-->>W: Output, errors, exit status
+    W->>W: Enforce timeout and cleanup
+    W->>DB: Persist execution metadata
+    W-->>API: Publish job completion
+    API-->>FE: Return or notify execution result
+    FE-->>U: Display result and status
 ```
 
-### Language-Specific Execution
+### Execution security controls
 
-| Language | Runtime process |
-|---|---|
-| Python | Run source with the configured Python interpreter |
-| JavaScript | Run source with the configured Node.js runtime |
-| C++ | Compile with `g++`, then execute the resulting binary |
-| Java | Compile with `javac`, then execute with the Java runtime |
+- Validate source size, language, project permissions, and job parameters.
+- Run code only in disposable, isolated execution environments.
+- Disable outbound networking by default.
+- Apply CPU, memory, process, disk, execution-time, and output limits.
+- Prevent executed programs from accessing production credentials.
+- Clean up temporary files and terminated containers.
+- Limit job submissions and queue consumption per user or project.
 
-Compilation and execution should be subject to appropriate time and resource limits. Compiler output, runtime output, and system diagnostics should be captured separately where practical.
+The implementation must also define how job status and output are delivered to the client, including polling or an authenticated streaming channel.
 
-### Sandbox Security Controls
-
-Every execution environment must have:
-
-- A non-root user.
-- No privileged container mode.
-- No mounted Docker socket.
-- No sensitive host filesystem mounts.
-- Minimal Linux capabilities.
-- Appropriate seccomp and AppArmor or equivalent restrictions.
-- CPU, memory, process-count, disk, and wall-clock limits.
-- Bounded standard output and standard error.
-- Network access disabled by default.
-- A disposable filesystem and cleanup after execution.
-
-Docker reduces risk but does not guarantee complete isolation. For publicly accessible execution of hostile code, consider stronger isolation such as microVMs and dedicated worker hosts.
-
-## 7. WebSocket Scaling Architecture
+## 7. Debugging Architecture
 
 ```mermaid
 flowchart TB
-    CLIENTS[Browser Clients]
-    LB[Load Balancer]
+    UI["Debugging Interface"]
+    API["Authenticated Debug API"]
+    AUTH["Permission Validation"]
+    DQ["Debug Job Queue"]
+    DW["Debug Worker"]
+    ADAPTER["Language-Specific Debug Adapter"]
+    RUNTIME["Python / Node.js / C++ / Java Runtime"]
+    SB["Isolated Debug Container"]
+    STATE["Breakpoint and Debug State"]
+    RESULT["Debug Events and Results"]
 
-    subgraph GATEWAYS["Collaboration Gateway Instances"]
-        A[Gateway A]
-        B[Gateway B]
-        C[Gateway C]
-    end
-
-    REDIS[(Redis Pub/Sub)]
-    STORE[(Durable Yjs State)]
-
-    CLIENTS <--> LB
-    LB <--> A
-    LB <--> B
-    LB <--> C
-
-    A <--> REDIS
-    B <--> REDIS
-    C <--> REDIS
-
-    A <--> STORE
-    B <--> STORE
-    C <--> STORE
+    UI --> API
+    API --> AUTH
+    AUTH --> DQ
+    DQ --> DW
+    DW --> SB
+    SB --> ADAPTER
+    ADAPTER --> RUNTIME
+    RUNTIME <--> STATE
+    STATE --> RESULT
+    RESULT --> DW
+    DW --> API
+    API --> UI
 ```
 
-### Scaling Strategy
+The debugging layer should use runtime-specific adapters rather than assuming identical debugger behavior across all languages.
 
-- Run multiple gateway instances behind a WebSocket-compatible load balancer.
-- Use a Yjs-compatible cross-instance synchronization mechanism.
-- Use Redis Pub/Sub for transient cross-instance distribution where appropriate.
-- Persist document state independently of gateway memory.
-- Use bounded message queues and backpressure for slow clients.
-- Configure connection heartbeats, reconnect backoff, and authentication expiry.
-- Apply connection and message-rate limits.
-- Monitor event-loop lag, memory usage, connection count, message rate, and synchronization latency.
+The debugging service must support the operations exposed by each configured adapter and must enforce the same isolation and resource controls as normal execution.
 
-Sticky sessions may help with routing, but they are not a substitute for shared coordination and durable document state.
+## 8. GitHub Import and Version History Workflow
 
-## 8. Database Design
+```mermaid
+flowchart TD
+    U["User selects GitHub repository"]
+    AUTH["Authorize GitHub Access"]
+    PERM["Validate Repository Permissions"]
+    FETCH["Retrieve Repository Files"]
+    VALIDATE["Validate Paths and File Limits"]
+    IMPORT["Create or Populate Project"]
+    PERSIST["Persist Project Files"]
+    SNAP["Create Version Snapshot"]
+    READY["Project Available in Workspace"]
 
-The initial relational schema may contain the following tables:
+    U --> AUTH
+    AUTH --> PERM
+    PERM --> FETCH
+    FETCH --> VALIDATE
+    VALIDATE --> IMPORT
+    IMPORT --> PERSIST
+    PERSIST --> SNAP
+    SNAP --> READY
+```
 
-| Table | Purpose |
+### Version restoration workflow
+
+1. The user selects a previous project version.
+2. The backend verifies restoration permissions.
+3. The system retrieves the requested snapshot.
+4. The system validates the snapshot and creates a recovery point for the current state.
+5. The system restores the project files and corresponding collaborative document state consistently.
+6. The system records the restoration action in the audit log.
+7. Connected collaborators receive the updated document state.
+
+Restoration must be designed as a controlled state transition rather than a sequence of unrelated file overwrites.
+
+## 9. Collaborative Terminal Workflow
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    actor C as Collaborator
+    participant API as Express API
+    participant T as Terminal Session Manager
+    participant SB as Isolated Terminal
+    participant DB as PostgreSQL
+
+    U->>API: Request terminal session
+    API->>API: Authenticate and authorize
+    API->>T: Create session
+    T->>SB: Provision isolated environment
+    SB-->>T: Session ready
+    T->>DB: Record session metadata
+    T-->>U: Return authorized session details
+
+    C->>API: Request to join session
+    API->>API: Validate project and session access
+    API-->>C: Authorize session connection
+
+    U->>T: Submit terminal input
+    T->>SB: Forward authorized input
+    SB-->>T: Stream output
+    T-->>U: Deliver terminal output
+    T-->>C: Deliver shared terminal output
+
+    T->>T: Enforce timeout and session limits
+    T->>SB: Terminate and clean up when required
+    T->>DB: Record session status
+```
+
+Terminal access requires separate authorization from ordinary project editing. A user allowed to view code is not automatically authorized to execute terminal commands.
+
+## 10. Team Permissions and Authorization
+
+The backend must enforce permissions across REST APIs, WebSockets, execution jobs, debugging sessions, terminal sessions, GitHub operations, and version restoration.
+
+A proposed initial role model is:
+
+| Capability | Owner | Admin | Editor | Viewer |
+|---|---|---|---|---|
+| View project | Yes | Yes | Yes | Yes |
+| Edit files | Yes | Yes | Yes | No |
+| Execute code | Yes | Yes | Yes | No |
+| Start debugging | Yes | Yes | Yes | No |
+| Access terminal | Yes | Yes | Policy-controlled | No |
+| Import repository | Yes | Policy-controlled | Policy-controlled | No |
+| Restore versions | Yes | Policy-controlled | No | No |
+| Manage members | Yes | Policy-controlled | No | No |
+| Delete project | Yes | Policy-controlled | No | No |
+
+The exact permissions assigned to Admin and Editor roles must be configurable and enforced consistently by the backend.
+
+Workspace membership does not automatically grant unrestricted access to every project. Project-level access rules must also be checked.
+
+## 11. Execution Analytics and Observability
+
+The analytics service consumes execution records and relevant operational metrics.
+
+The dashboard should display:
+
+- Total execution requests.
+- Successful and failed executions.
+- Execution duration and trends.
+- Compilation failures and timeout counts.
+- Activity grouped by project, language, and time range.
+- Relevant queue and worker health metrics for authorized administrators.
+
+### Operational signals
+
+| Area | Metrics |
 |---|---|
-| `users` | User identity and profile metadata |
-| `projects` | Project ownership and metadata |
-| `project_members` | Membership and role assignments |
-| `files` | File paths, metadata, and optional non-collaborative file contents |
-| `document_snapshots` | Durable snapshots of collaborative documents |
-| `document_updates` | Durable incremental Yjs updates, if using update-log persistence |
-| `executions` | Execution requests, status, exit code, and timing |
-| `audit_logs` | Important security and administrative events |
+| Collaboration | Active connections, synchronization latency, reconnects |
+| API | Request latency, error rate, authentication failures |
+| Execution | Job duration, timeout count, worker failures |
+| Queue | Queue depth, waiting time, failed jobs |
+| Database | Query latency, connection usage, persistence failures |
+| Terminal | Active sessions, session duration, cleanup failures |
+| Security | Authorization denials, rate-limit events, sensitive actions |
 
-### Persistence Design Notes
+Logs and metrics must not expose secrets, access tokens, or unnecessary user code.
 
-- Use stable document identifiers.
-- Enforce project membership through backend authorization.
-- Avoid writing the entire collaborative document to PostgreSQL for every keystroke.
-- Batch or asynchronously persist updates with a defined durability guarantee.
-- Periodically compact update history into snapshots.
-- Ensure snapshot creation and update-log cleanup cannot lose acknowledged document state.
-- Use a transactional strategy where needed to coordinate metadata and persistence records.
+## 12. Deployment Architecture
 
-The exact persistence model can be either an update log plus snapshots or a suitable durable Yjs storage adapter. Avoid maintaining two conflicting sources of document truth.
+The deployment environment must support persistent application services, WebSockets, PostgreSQL, Redis, and container-based execution workers.
 
-## 9. API Design
+```mermaid
+flowchart TB
+    USER["Browser"]
+    FRONT["Next.js Frontend"]
+    GATE["API and WebSocket Entry Points"]
 
-Illustrative REST endpoints:
+    subgraph SERVICES["Application Services"]
+        API["Express API"]
+        WS["Collaboration Service"]
+        GH["GitHub Integration"]
+    end
 
-| Method | Endpoint | Purpose |
+    subgraph WORKERS["Container-Capable Worker Infrastructure"]
+        QUEUE["Redis Queue"]
+        EXEC["Execution Workers"]
+        DEBUG["Debugging Workers"]
+        TERM["Terminal Session Service"]
+        SANDBOX["Isolated Containers"]
+    end
+
+    subgraph STORAGE["Managed or Self-Hosted Data Services"]
+        PG[("PostgreSQL")]
+        REDIS[("Redis")]
+        DOCS[("Durable Document and Snapshot Storage")]
+    end
+
+    USER --> FRONT
+    FRONT --> GATE
+    GATE --> API
+    GATE --> WS
+
+    API --> GH
+    API --> QUEUE
+    WS --> REDIS
+
+    QUEUE --> EXEC
+    QUEUE --> DEBUG
+    API --> TERM
+
+    EXEC --> SANDBOX
+    DEBUG --> SANDBOX
+    TERM --> SANDBOX
+
+    API --> PG
+    GH --> PG
+    EXEC --> PG
+    DEBUG --> PG
+    TERM --> PG
+    WS --> DOCS
+    DOCS --> PG
+```
+
+### Deployment requirements
+
+- The frontend can be deployed to a web hosting platform that supports Next.js.
+- The API and collaboration services require suitable long-running service and WebSocket support.
+- Execution, debugging, and terminal services require container-capable infrastructure with enforceable isolation.
+- PostgreSQL must provide durable storage and backups appropriate to the deployment.
+- Redis must be available to services that require queues or cross-instance coordination.
+- Secrets must be supplied through secure environment configuration.
+- Health checks, logging, monitoring, and controlled service shutdown must be implemented.
+
+A serverless frontend hosting platform must not be assumed to provide Docker execution or persistent WebSocket services. These capabilities may need separate backend and worker deployments.
+
+## 13. Suggested Repository Structure
+
+```text
+collaborative-code-editor/
+├── frontend/
+│   ├── app/
+│   ├── components/
+│   │   ├── editor/
+│   │   ├── collaboration/
+│   │   ├── debugging/
+│   │   ├── terminal/
+│   │   ├── versions/
+│   │   └── analytics/
+│   ├── hooks/
+│   └── lib/
+│
+├── backend/
+│   ├── src/
+│   │   ├── api/
+│   │   ├── auth/
+│   │   ├── projects/
+│   │   ├── workspaces/
+│   │   ├── collaboration/
+│   │   ├── github/
+│   │   ├── versions/
+│   │   ├── executions/
+│   │   ├── debugging/
+│   │   ├── terminal/
+│   │   ├── analytics/
+│   │   ├── permissions/
+│   │   └── audit/
+│   └── tests/
+│
+├── workers/
+│   ├── execution/
+│   ├── debugging/
+│   └── terminal/
+│
+├── packages/
+│   ├── shared-types/
+│   └── validation/
+│
+├── database/
+│   ├── migrations/
+│   └── schema/
+│
+├── infrastructure/
+│   ├── docker/
+│   ├── deployment/
+│   └── monitoring/
+│
+├── docs/
+│   ├── PRD.md
+│   └── SYSTEM_ARCHITECTURE.md
+│
+└── README.md
+```
+
+This is a suggested logical organization, not a requirement to deploy every directory as a separate service. Related modules may share a deployable service in the initial implementation.
+
+## 14. Architecture Decisions and Constraints
+
+1. **Yjs for collaboration:** Provides CRDT-based document synchronization and convergence.
+2. **PostgreSQL for durable application state:** Stores project metadata, permissions, execution history, and version metadata.
+3. **Redis for transient coordination:** Supports job queues and cross-instance messaging, not permanent document storage.
+4. **Isolated workers for untrusted code:** Separates execution from the API and collaboration services.
+5. **Language-specific debugging:** Debugging capabilities depend on the configured runtime and adapter.
+6. **Role-based authorization:** Backend checks are required for every protected operation.
+7. **Snapshot-based version history:** Project rollback must preserve a recoverable prior state.
+8. **Controlled terminal sessions:** Terminal environments require isolation, authorization, and cleanup.
+9. **Modular implementation:** Services should be independently testable, with separate deployment introduced where justified.
+10. **Incremental security validation:** Execution, debugging, and terminal isolation must be verified before exposing these capabilities to untrusted users.
+
+## 15. Implementation Phases
+
+| Phase | Scope | Completion Goal |
 |---|---|---|
-| `POST` | `/api/auth/register` | Register a user |
-| `POST` | `/api/projects` | Create a project |
-| `GET` | `/api/projects` | List accessible projects |
-| `GET` | `/api/projects/:projectId` | Retrieve project metadata |
-| `POST` | `/api/projects/:projectId/members` | Manage project membership |
-| `POST` | `/api/executions` | Submit an execution job |
-| `GET` | `/api/executions/:executionId` | Retrieve execution status |
-| `GET` | `/api/projects/:projectId/executions` | Retrieve execution history |
+| Phase 1 | Authentication, projects, file management, editor | Users can create and manage projects |
+| Phase 2 | Yjs collaboration, WebSockets, persistence | Concurrent editing and recovery work |
+| Phase 3 | Four-language execution and sandboxing | Secure execution is verified |
+| Phase 4 | GitHub import and version history | Import and rollback work reliably |
+| Phase 5 | Integrated debugging and collaborative terminal | Runtime tooling and terminal isolation pass tests |
+| Phase 6 | Teams, permissions, analytics, observability | Access control and operational visibility are complete |
+| Phase 7 | Integration, security, load, and recovery testing | Initial release acceptance criteria are satisfied |
 
-Collaborative document updates should use the selected Yjs WebSocket protocol rather than an ordinary REST endpoint.
+Phases may overlap where dependencies permit, but sandbox security and authorization must be validated before execution and terminal functionality are exposed.
 
-## 10. Deployment Architecture
+## 16. Conclusion
 
-For the first deployment:
+This architecture provides a modular foundation for a real-time collaborative development environment. It combines collaborative editing, secure multi-language execution, debugging, GitHub integration, version history, team workspaces, collaborative terminals, and operational analytics.
 
-- Deploy the Next.js frontend on a suitable web platform.
-- Deploy the Express API and collaboration server on a WebSocket-capable service.
-- Deploy Docker execution workers on infrastructure that supports the required isolation and container privileges.
-- Use a managed PostgreSQL database.
-- Use Redis for coordination and queue management.
-- Keep secrets in environment variables or a secrets manager.
-- Use HTTPS and WSS for client communication.
+The design prioritizes document consistency, durable persistence, strict authorization, isolated execution, and maintainability. Implementation should proceed incrementally, with automated integration and security testing validating each subsystem against PRD v2.0.
 
-Do not assume a serverless frontend platform can run persistent Docker execution workers. Execution requires container-capable infrastructure with appropriate isolation controls.
+---
 
-## 11. Observability and Reliability
-
-Monitor:
-
-- Active WebSocket connections and connection failures.
-- Per-room message rates and update latency.
-- Document persistence latency and recovery failures.
-- Execution queue depth and wait time.
-- Worker CPU, memory, disk, and timeout counts.
-- Compilation and runtime failure rates.
-- Authentication and authorization failures.
-
-Implement structured logs, request/job correlation IDs, health checks, graceful shutdown, and automated recovery tests.
-
-## 12. Recommended Implementation Order
-
-1. Create the monorepo and configure TypeScript.
-2. Build the Next.js workspace with Monaco Editor.
-3. Implement authentication and project metadata.
-4. Add Yjs document synchronization for two clients.
-5. Add durable document persistence and reconnection recovery.
-6. Add file and project permissions.
-7. Implement the execution queue and Python sandbox.
-8. Add JavaScript, C++, and Java workers.
-9. Harden sandbox security and test resource limits.
-10. Add Redis-backed cross-instance collaboration.
-11. Add monitoring, integration tests, and deployment configuration.
-
-## 13. Architecture Decisions
-
-- **CRDT:** Yjs for concurrent document editing.
-- **Editor:** Monaco Editor for the browser-based coding experience.
-- **Backend:** Node.js and Express for API and execution orchestration.
-- **Database:** PostgreSQL for relational metadata and durable state.
-- **Real-time transport:** WebSockets for collaborative updates.
-- **Queue:** Redis-backed job queue for asynchronous execution.
-- **Execution isolation:** Disposable, restricted Docker containers.
-- **Scaling:** Multiple collaboration gateways and independent execution workers.
-
-The system should prioritize correct synchronization, durable recovery, and execution isolation before adding advanced features or increasing infrastructure complexity.
+**End of System Architecture Document**
